@@ -5,19 +5,19 @@ from typing import Tuple, List
 from scipy import signal, ndimage
 from utilities import show_images
 
-def harris_corners(img: np.ndarray, threshold=1.0, blur_sigma=2.0, k=0.04, nms_n_corners=5, nms_n_bins=10, nms_min_dist=0.0) -> List[Tuple[float, np.ndarray]]:
+def harris_corners(img: np.ndarray, threshold=1.0, blur_sigma=2.0, k=0.04, nms_n_corners=5, nms_n_bins=10, print_result=False) -> List[Tuple[float, np.ndarray]]:
     """
     Return the harris corners detected in the image.
     :param img: The grayscale image.
     :param threshold: The harris respnse function threshold.
     :param blur_sigma: Sigma value for the image bluring.
     :param k: Harris response trace scale factor.
-    :param nms_n_corners: Maximum number of corners in each nms box.
+    :param nms_n_corners: Maximum number of corners in each nms bin.
     :param nms_n_bins: Number of nms bins along each axis of the image.
-    :param nms_min_dist: Minimum distance between corners in each nms bins.
     :return: A sorted list of tuples containing response value and image position.
     The list is sorted from largest to smallest response value.
     """
+    # img[v,u], y-axis parallel to v-avis, x-axis parallel to u-axis
     img_height, img_width = img.shape
 
     # Calculate x- and y-derivative of the image using Sobel operators
@@ -57,9 +57,9 @@ def harris_corners(img: np.ndarray, threshold=1.0, blur_sigma=2.0, k=0.04, nms_n
     responses = responses[np.where(responses > threshold)]
     
     # Sort responses and corners based on response
-    mask = np.flip(np.argsort(responses))
-    positions = np.take(positions, mask, axis=0)
-    responses = np.take(responses, mask)
+    filter_indices = np.flip(np.argsort(responses))
+    positions = np.take(positions, filter_indices, axis=0)
+    responses = np.take(responses, filter_indices)
     
     # Perform non-maximum suppression
     bin_height = int(np.ceil(img_height / nms_n_bins))
@@ -76,16 +76,9 @@ def harris_corners(img: np.ndarray, threshold=1.0, blur_sigma=2.0, k=0.04, nms_n
         bin_values = bins[bin_index]
         is_not_nan = np.logical_not(np.isnan(bin_values))
 
-        position = positions[index]
-
         n_neighbours = np.sum(is_not_nan, dtype=int)
-        neighbours = bin_values[is_not_nan].astype(int)
-        neighbour_positions = np.take(positions, neighbours, axis=0)
 
-        differences = neighbour_positions - position
-        distances = np.sqrt(np.linalg.norm(differences, axis = 1))
-
-        if n_neighbours < nms_n_corners and not np.any(distances < nms_min_dist):
+        if n_neighbours < nms_n_corners:
             valid_index = np.argwhere(np.isnan(bin_values))[0][0]
             bins[bin_index][valid_index] = index
             nms_indices.append(index)
@@ -95,5 +88,8 @@ def harris_corners(img: np.ndarray, threshold=1.0, blur_sigma=2.0, k=0.04, nms_n
     nms_responses = np.take(responses, nms_indices)
 
     corners = [(nms_responses[i], nms_positions[i]) for i in range(len(nms_positions))]
-    
+
+    if print_result:
+        print("Harris corner detector detected {} corners...".format(len(corners)))
+
     return corners

@@ -17,5 +17,21 @@ def project_points(ids: np.ndarray, points: np.ndarray, depth_img: np.ndarray) -
     :param depth_img: The depth image. Divide pixel value by 5000 to get depth in meters.
     :return: A tuple containing a N vector and a 3xN vector of all the points that where successfully projected.
     """
-    raise NotImplementedError
+    # points = [v, u]
+    depth_img = depth_img / 5000
+    point_depths = depth_img[tuple(points.astype(int))]
 
+    mask = point_depths > 0
+    valid_ids = ids[mask]
+    valid_points = points[:,mask]
+
+    u = valid_points[1]
+    v = valid_points[0]
+    
+    Z = point_depths[mask]
+    X = (u - cx) * (Z / fx)
+    Y = (v - cy) * (Z / fy)
+
+    valid_points_3d = np.stack([X, Y, Z], axis=0)
+    
+    return valid_ids, valid_points_3d
