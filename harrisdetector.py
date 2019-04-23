@@ -5,7 +5,7 @@ from typing import Tuple, List
 from scipy import signal, ndimage
 from utilities import show_images
 
-def harris_corners(img: np.ndarray, threshold=1.0, blur_sigma=2.0, k=0.04, nms_n_corners=5, nms_n_bins=10, print_result=False) -> List[Tuple[float, np.ndarray]]:
+def harris_corners(img: np.ndarray, threshold=1.0, blur_sigma=2.0, k=0.04, nms_n_corners=5, nms_n_bins=10, print_result=True) -> List[Tuple[float, np.ndarray]]:
     """
     Return the harris corners detected in the image.
     :param img: The grayscale image.
@@ -29,7 +29,7 @@ def harris_corners(img: np.ndarray, threshold=1.0, blur_sigma=2.0, k=0.04, nms_n
                         [1.0, 2.0, 1.0]])
     img_x = signal.convolve2d(img, sobel_x, mode='same', boundary='symm')
     img_y = signal.convolve2d(img, sobel_y, mode='same', boundary='symm')
-    
+
     # Compute products of derivatives
     img_xx = np.multiply(img_x, img_x)
     img_yy = np.multiply(img_y, img_y)
@@ -53,7 +53,8 @@ def harris_corners(img: np.ndarray, threshold=1.0, blur_sigma=2.0, k=0.04, nms_n
     responses = dets - k*np.square(traces)
 
     # Threshold based on response value
-    positions = np.argwhere(responses > threshold)
+    img_indices = np.argwhere(responses > threshold)
+    positions = np.flip(img_indices, axis=1)
     responses = responses[np.where(responses > threshold)]
     
     # Sort responses and corners based on response
