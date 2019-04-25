@@ -6,8 +6,21 @@ from typing import Tuple, List
 from math import sin, cos, pi, sqrt
 from collections import defaultdict
 
+from utilities import show_images
+
 flann = FLANN()
 
+def is_out_of_bounds(img_height: int, img_width: int, x: float, y: float, patch_size: int) -> bool:
+    patch_half_size_floored = patch_size // 2
+    x_low = x - patch_half_size_floored
+    x_high = x + patch_half_size_floored
+    y_low = y - patch_half_size_floored
+    y_high = y + patch_half_size_floored
+
+    return x_low < 0 or x_high > img_width or y_low < 0 or y_high > img_height
+
+def is_not_invertible(matrix: np.ndarray) -> bool:
+    return not (matrix.shape[0] == matrix.shape[1] and np.linalg.det(matrix) != 0)
 
 def get_warped_patch(img: np.ndarray, patch_size: int,
                      x_translation: float, y_translation: float, theta) -> np.ndarray:
@@ -24,10 +37,19 @@ def get_warped_patch(img: np.ndarray, patch_size: int,
     c = cos(-theta)
     s = sin(-theta)
 
+    # Translation + rotation transform, internal angles preserved
     t = np.array([[c, s, (-c - s) * patch_half_size + x_translation],
                   [-s, c, (s - c) * patch_half_size + y_translation]])
 
     return cv2.warpAffine(img, t, (patch_size, patch_size), flags=cv2.WARP_INVERSE_MAP)
+
+def get_euclidean_jacobian(x_translation, y_translation, theta):
+    c = cos(theta)
+    s = sin(theta)
+
+    jacobian = np.array([[1, 0, -s*x_translation - c*y_translation],
+                         [0, 1, c*x_translation - s*y_translation]])
+    return jacobian
 
 
 class KLTTracker:
@@ -76,11 +98,70 @@ class KLTTracker:
         :return: Return 0 when track is successful, 1 any point of the tracking patch is outside the image,
         2 if a invertible hessian is encountered and 3 if the final error is larger than max_error.
         """
+        img_height, img_width = img.shape
+
+        # Initialization of parameters
+        p = np.array([self.pos_x, self.pos_y, self.theta])
+        delta_p = np.zeros(3)
+        converged = False
 
         for iteration in range(max_iterations):
-            raise NotImplementedError  # You should try to implement this without using any loops, other than this iteration loop. Otherwise it will be very slow.
+
+            # Out of bounds check
+            if is_out_of_bounds(img_height, img_width, p[0], p[1], self.patchSize):
+                return 1
+            
+            # Warp image patch
+            img_patch_warped = get_warped_patch(img, self.patchSize, p[0], p[1], p[2])
+
+            # Subtract template patch from warped image patch
+            img_patch_error = img_patch_warped - self.trackingPatch
+
+            # Compute image gradients
+            #img_patch_grad = img_grad[int(p[1]) - self.patchHalfSizeFloored:int(p[1]) + self.patchHalfSizeFloored + 1,
+                                      #int(p[0]) - self.patchHalfSizeFloored:int(p[0]) + self.patchHalfSizeFloored + 1]
+            img_patch_grad = get_warped_patch(img_grad, self.patchSize, p[0], p[1], p[2])
+            # img_patch_grad = [:,:,grad], grad = [x_grad, y_grad]
+
+            # Evaluate Jacobian at (x,p)
+            jacobian = get_euclidean_jacobian(p[0], p[1], p[2])
+
+            # Compute the steepest descent
+            steepest_descent = img_patch_grad @ jacobian
+            
+            # Compute Hessian, utilizing broadcasting to compute outer product
+            steepest_descent = steepest_descent[:,:,:,np.newaxis]
+            hessian = np.sum(steepest_descent.transpose(0,1,3,2) * steepest_descent, (0, 1))
+
+            if is_not_invertible(hessian):
+                return 2
+            
+            # Compute delta_p
+            steepest_descent = np.squeeze(steepest_descent, axis=3)
+            delta_p = np.dot(np.linalg.inv(hessian), np.sum(steepest_descent * img_patch_error[:,:,np.newaxis], (0, 1)))
+
+            # Update p
+            p += delta_p
+
+            # Stopping criterion
+            if np.sqrt(delta_p.dot(delta_p)) < min_delta_length:
+                converged = True
+                n_iterations = iteration
+                break
+
+        # Return 3
+        if (img_patch_error**2).mean() > max_error:
+            return 3
+
+        # Update position of tracking patch
+        if converged:
+            self.translationX = p[0] - self.initialPosition[0]
+            self.translationY = p[1] - self.initialPosition[1]
+            self.theta = p[2]
 
         self.positionHistory.append((self.pos_x, self.pos_y, self.theta))  # Add new point to positionHistory to visualize tracking
+
+        return 0
 
 
 class PointTracker:
@@ -180,5 +261,5 @@ class PointTracker:
         for i, klt in enumerate(self.currentTrackers):
             ids[i] = klt.trackerID
             positions[:, i] = (klt.pos_x, klt.pos_y)
-
+        
         return ids, positions
