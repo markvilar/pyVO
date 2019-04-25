@@ -3,6 +3,8 @@ import cv2
 
 from typing import Tuple
 
+from utilities import visualize_corners
+
 fx = 520.9
 fy = 521.0
 cx = 325.1
@@ -15,6 +17,7 @@ def project_points(ids: np.ndarray, points: np.ndarray, depth_img: np.ndarray) -
     :param ids: A N vector point ids.
     :param points: A 2xN matrix of 2D points
     :param depth_img: The depth image. Divide pixel value by 5000 to get depth in meters.
+    :param rgb_img: The rgb image.
     :return: A tuple containing a N vector and a 3xN vector of all the points that where successfully projected.
     """
     # points = [u, v]

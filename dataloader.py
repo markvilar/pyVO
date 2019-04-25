@@ -52,6 +52,16 @@ class DataLoader:
                 orientation = np.array([float(qx_str), float(qy_str), float(qz_str), float(qw_str)])
                 self.gtTransforms.append((timestamp, position, orientation))
 
+    def get_rgb(self) -> np.ndarray:
+        image_path = self.rgbImagePaths[self.grayImageIndex][1]
+        image_path = os.path.join(self.datasetPath, image_path)
+        img = cv2.imread(image_path)  # Read and convert to 8-bit greyscale
+        assert img is not None, f"Unable to read image: {os.path.abspath(image_path)}"
+        return img.astype(np.float) / 255.0
+
+        img = cv2.imread(image_path)
+        return img.astype(np.float)
+
     def get_greyscale(self) -> np.ndarray:
         image_path = self.rgbImagePaths[self.grayImageIndex][1]
         image_path = os.path.join(self.datasetPath, image_path)
@@ -85,4 +95,4 @@ class DataLoader:
         self.grayImageIndex += 1
 
     def has_next(self) -> bool:
-        return self.grayImageIndex < len(self.rgbImagePaths)
+        return self.grayImageIndex < len(self.rgbImagePaths) - 1
