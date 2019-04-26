@@ -5,6 +5,7 @@ from pyflann import *
 from typing import Tuple, List
 from math import sin, cos, pi, sqrt
 from collections import defaultdict
+import time
 
 from utilities import show_images
 
@@ -19,8 +20,8 @@ def is_out_of_bounds(img_height: int, img_width: int, x: float, y: float, patch_
 
     return x_low < 0 or x_high > img_width or y_low < 0 or y_high > img_height
 
-def is_not_invertible(matrix: np.ndarray) -> bool:
-    return not (matrix.shape[0] == matrix.shape[1] and np.linalg.det(matrix) != 0)
+def is_invertible(matrix: np.ndarray) -> bool:
+    return matrix.shape[0] == matrix.shape[1] and np.linalg.det(matrix) != 0
 
 def get_warped_patch(img: np.ndarray, patch_size: int,
                      x_translation: float, y_translation: float, theta) -> np.ndarray:
@@ -43,13 +44,29 @@ def get_warped_patch(img: np.ndarray, patch_size: int,
 
     return cv2.warpAffine(img, t, (patch_size, patch_size), flags=cv2.WARP_INVERSE_MAP)
 
-def get_euclidean_jacobian(x_translation, y_translation, theta):
+def get_euclidean_jacobians(theta, patch_size, patch_half_size_floored):
+    """
+    Evaluates the jacobians for a Euclidean transform at every pixel in the image patch.
+    :param x_center: x translation of the image patch center.
+    :param y_center: y translation of the image patch center.
+    :param theta: The rotation angle of the Euclidean transform.
+    :param patch_size: The size of the image patch.
+    :param patch_half_size_floored: The floored half of the patch size.
+    :return A patch_size x patch_size x 2 x 3 np.ndarray with the Jacobian at each pixel.
+    """
+    us, vs = np.mgrid[-patch_half_size_floored:patch_half_size_floored+1,
+                      -patch_half_size_floored:patch_half_size_floored+1]
+
     c = cos(theta)
     s = sin(theta)
 
-    jacobian = np.array([[1, 0, -s*x_translation - c*y_translation],
-                         [0, 1, c*x_translation - s*y_translation]])
-    return jacobian
+    jacobians = np.zeros((patch_size, patch_size, 2, 3))
+    jacobians[:,:,0,0] = 1
+    jacobians[:,:,1,1] = 1
+    jacobians[:,:,0,2] = -s*us - c*vs
+    jacobians[:,:,1,2] = c*us - s*vs
+
+    return jacobians
 
 
 class KLTTracker:
@@ -86,7 +103,8 @@ class KLTTracker:
         return self.initialPosition[1] + self.translationY
 
     def track_new_image(self, img: np.ndarray, img_grad: np.ndarray, max_iterations: int,
-                        min_delta_length=2.5e-2, max_error=0.035) -> int:
+                        min_delta_length=2.5e-2, max_error=0.02, translation_step_length=12, 
+                        rotation_step_length=1, visualize=False) -> int:
         """
         Tracks the KLT tracker on a new grayscale image. You will need the get_warped_patch function here.
         :param img: The image.
@@ -101,72 +119,66 @@ class KLTTracker:
         img_height, img_width = img.shape
 
         # Initialization of parameters
-        p = np.array([self.pos_x, self.pos_y, self.theta])
         delta_p = np.zeros(3)
-        converged = False
 
         for iteration in range(max_iterations):
-
             # Out of bounds check
-            if is_out_of_bounds(img_height, img_width, p[0], p[1], self.patchSize):
+            if is_out_of_bounds(img_height, img_width, self.pos_x, self.pos_y, self.patchSize):
                 return 1
+
+            # Warp image patch: I(W(x;p))
+            img_patch_warped = get_warped_patch(img, self.patchSize, self.pos_x, self.pos_y, self.theta)
+
+            # Compute error: T(x) - I(W(x;p))
+            img_patch_error = (self.trackingPatch - img_patch_warped)[:,:,np.newaxis]
+
+            # Compute image gradient: nablaI(W(x;p))
+            img_patch_grad_warped = get_warped_patch(img_grad, self.patchSize, self.pos_x, self.pos_y, self.theta)[:,:,np.newaxis,:]
             
-            # Warp image patch
-            img_patch_warped = get_warped_patch(img, self.patchSize, p[0], p[1], p[2])
-
-            # Subtract template patch from warped image patch
-            img_patch_error = img_patch_warped - self.trackingPatch
-
-            # Compute image gradients
-            #img_patch_grad = img_grad[int(p[1]) - self.patchHalfSizeFloored:int(p[1]) + self.patchHalfSizeFloored + 1,
-                                      #int(p[0]) - self.patchHalfSizeFloored:int(p[0]) + self.patchHalfSizeFloored + 1]
-            img_patch_grad = get_warped_patch(img_grad, self.patchSize, p[0], p[1], p[2])
-            # img_patch_grad = [:,:,grad], grad = [x_grad, y_grad]
-
             # Evaluate Jacobian at (x,p)
-            jacobian = get_euclidean_jacobian(p[0], p[1], p[2])
+            jacobians = get_euclidean_jacobians(self.theta, self.patchSize, self.patchHalfSizeFloored)
 
             # Compute the steepest descent
-            steepest_descent = img_patch_grad @ jacobian
-            
+            steepest_descent = img_patch_grad_warped @ jacobians
+    
             # Compute Hessian, utilizing broadcasting to compute outer product
-            steepest_descent = steepest_descent[:,:,:,np.newaxis]
-            hessian = np.sum(steepest_descent.transpose(0,1,3,2) * steepest_descent, (0, 1))
+            hessian = np.sum(steepest_descent.transpose(0,1,3,2) @ steepest_descent, (0, 1))
 
-            if is_not_invertible(hessian):
+            if not is_invertible(hessian):
                 return 2
             
             # Compute delta_p
-            steepest_descent = np.squeeze(steepest_descent, axis=3)
-            delta_p = np.dot(np.linalg.inv(hessian), np.sum(steepest_descent * img_patch_error[:,:,np.newaxis], (0, 1)))
+            descent_step = steepest_descent.transpose(0,1,3,2) @ img_patch_error[:,:,:,np.newaxis]
+            delta_p = np.dot(np.linalg.inv(hessian), np.sum(descent_step, (0, 1, 3)))
 
             # Update p
-            p += delta_p
+            self.translationX += translation_step_length*delta_p[0]
+            self.translationY += translation_step_length*delta_p[1]
+            self.theta += rotation_step_length*delta_p[2]
+
+            if visualize:
+                show_images([self.trackingPatch, img_patch_warped, img_patch_error], 
+                            ["Tracking patch", "Warped Patch", "Error patch"])
+                cv2.waitKey(50)
 
             # Stopping criterion
             if np.sqrt(delta_p.dot(delta_p)) < min_delta_length:
-                converged = True
-                n_iterations = iteration
                 break
+        
+        print((img_patch_error**2).mean())
 
-        # Return 3
         if (img_patch_error**2).mean() > max_error:
             return 3
 
-        # Update position of tracking patch
-        if converged:
-            self.translationX = p[0] - self.initialPosition[0]
-            self.translationY = p[1] - self.initialPosition[1]
-            self.theta = p[2]
-
-        self.positionHistory.append((self.pos_x, self.pos_y, self.theta))  # Add new point to positionHistory to visualize tracking
+        # Add new point to positionHistory to visualize tracking
+        self.positionHistory.append((self.pos_x, self.pos_y, self.theta))
 
         return 0
 
 
 class PointTracker:
 
-    def __init__(self, max_points=80, tracking_patch_size=27):
+    def __init__(self, max_points=40, tracking_patch_size=41):
         self.maxPoints = max_points
         self.trackingPatchSize = tracking_patch_size
         self.currentTrackers = []
