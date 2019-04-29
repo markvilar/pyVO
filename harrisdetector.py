@@ -4,22 +4,21 @@ import numpy as np
 from operator import itemgetter
 from typing import Tuple, List
 
-from utilities import show_images, show_image, visualize_corners
+from utilities import visualize_harris_corners
 
-def harris_corners(img: np.ndarray, threshold=100.0, blur_sigma=6.0, blur_kernel_size = 3, k=0.06, nms_bin_size=13, visualize=True) -> List[Tuple[float, np.ndarray]]:
+def harris_corners(img: np.ndarray, threshold=1.0, k=0.06, blur_sigma=4.0, blur_kernel_size=15, nms_bin_size=40, visualize=False) -> List[Tuple[float, np.ndarray]]:
     """
     Return the harris corners detected in the image.
     :param img: The grayscale image.
     :param threshold: The harris respnse function threshold.
     :param blur_sigma: Sigma value for the image bluring.
+    :param blur_kernel_size: The kernel size of the Guassian blur filter.
     :param k: Harris response trace scale factor.
     :param nms_bin_size: Size of the bins used to perform non-maximum suppression.
+    :param visualize: Whether to show the Harris corners or not.
     :return: A sorted list of tuples containing response value and image position.
     The list is sorted from largest to smallest response value.
     """
-    # img[v,u], y-axis parallel to v-avis, x-axis parallel to u-axis
-    # img_height, img_width = img.shape
-
     if nms_bin_size < 3:
         nms_bin_size = 3
     elif nms_bin_size % 2 == 0:
@@ -27,11 +26,12 @@ def harris_corners(img: np.ndarray, threshold=100.0, blur_sigma=6.0, blur_kernel
 
     if blur_kernel_size < 3:
         blur_kernel_size = 3
+    elif blur_kernel_size % 2 == 0:
+        blur_kernel_size += 1
 
     nms_kernel = np.ones((nms_bin_size, nms_bin_size))
     blur_kernel = (blur_kernel_size, blur_kernel_size)
     
-    # TODO: Look into multi-threading
     # Calculate x- and y-derivative of the image using Scharr
     img_x = cv2.Scharr(src=img, ddepth=-1, dx=1, dy=0)
     img_y = cv2.Scharr(src=img, ddepth=-1, dx=0, dy=1)
@@ -63,6 +63,6 @@ def harris_corners(img: np.ndarray, threshold=100.0, blur_sigma=6.0, blur_kernel
     corners = [(sorted_responses[i], sorted_positions[i]) for i in range(len(sorted_positions))]
 
     if visualize:
-        visualize_corners(img, corners)
+        visualize_harris_corners(img, corners)
 
     return corners

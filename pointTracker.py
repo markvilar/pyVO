@@ -1,17 +1,26 @@
 import numpy as np
 import cv2
+import csv
 
 from pyflann import *
 from typing import Tuple, List
 from math import sin, cos, pi, sqrt
 from collections import defaultdict
-import time
 
-from utilities import show_images
+from utilities import visualize_lucas_kanade
 
 flann = FLANN()
 
 def is_out_of_bounds(img_height: int, img_width: int, x: float, y: float, patch_size: int) -> bool:
+    """
+    Checks if the image patch is out of bounds of the image.
+    :param img_height: The image height.
+    :param img_width: The image width.
+    :param x: The x translation of the image patch center.
+    :param y: The y translation of the image patch center.
+    :param patch_size: The size of the image patch.
+    :return: Boolean, whether the patch is out of bounds or not.
+    """
     patch_half_size_floored = patch_size // 2
     x_low = x - patch_half_size_floored
     x_high = x + patch_half_size_floored
@@ -21,6 +30,11 @@ def is_out_of_bounds(img_height: int, img_width: int, x: float, y: float, patch_
     return x_low < 0 or x_high > img_width or y_low < 0 or y_high > img_height
 
 def is_invertible(matrix: np.ndarray) -> bool:
+    """
+    Checks if a matrix is invertible.
+    :param matrix: The matrix.
+    :return: Boolean, whether the matrix is invertible or not.
+    """
     return matrix.shape[0] == matrix.shape[1] and np.linalg.det(matrix) != 0
 
 def get_warped_patch(img: np.ndarray, patch_size: int,
@@ -52,7 +66,7 @@ def get_euclidean_jacobians(theta, patch_size, patch_half_size_floored):
     :param theta: The rotation angle of the Euclidean transform.
     :param patch_size: The size of the image patch.
     :param patch_half_size_floored: The floored half of the patch size.
-    :return A patch_size x patch_size x 2 x 3 np.ndarray with the Jacobian at each pixel.
+    :return A NxNx2x3 np.ndarray with the Jacobian at each pixel.
     """
     us, vs = np.mgrid[-patch_half_size_floored:patch_half_size_floored+1,
                       -patch_half_size_floored:patch_half_size_floored+1]
@@ -68,6 +82,21 @@ def get_euclidean_jacobians(theta, patch_size, patch_half_size_floored):
 
     return jacobians
 
+def get_gaussian_weights(kernel_size: int, sigma: float, scale: float) -> np.ndarray:
+    """
+    Returns a Guassian weighting kernel.
+    :param kernel_size: The kernel size.
+    :param sigma: Standard deviation of the Gaussian distribution.
+    :param scale: Scale factor of the weighting kernel.
+    """
+    kernel_half_size_floored = kernel_size // 2
+
+    us = np.linspace(-kernel_half_size_floored, kernel_half_size_floored, kernel_size)
+    kernel_1d = (1 / sqrt(2*pi*sigma**2)) * np.exp(-us**2 / (2*sigma**2))
+    kernel_2d = np.outer(kernel_1d, kernel_1d)
+
+    return scale * kernel_2d
+
 
 class KLTTracker:
 
@@ -80,6 +109,7 @@ class KLTTracker:
         self.theta = 0.0
 
         self.positionHistory = [(self.pos_x, self.pos_y, self.theta)]
+        self.convergenceHistory = []
         self.trackerID = tracker_id
         self.patchSize = patch_size
         self.patchHalfSizeFloored = patch_size // 2
@@ -103,8 +133,9 @@ class KLTTracker:
         return self.initialPosition[1] + self.translationY
 
     def track_new_image(self, img: np.ndarray, img_grad: np.ndarray, max_iterations: int,
-                        min_delta_length=2.5e-2, max_error=0.02, translation_step_length=12, 
-                        rotation_step_length=1, visualize=False) -> int:
+                        min_delta_length=2.5e-2, max_error=0.025, translation_step_length=40, 
+                        rotation_step_length=5, annealing_time_constant=2, visualize=False) -> int:
+                        
         """
         Tracks the KLT tracker on a new grayscale image. You will need the get_warped_patch function here.
         :param img: The image.
@@ -113,30 +144,40 @@ class KLTTracker:
         :param min_delta_length: The minimum length of the delta vector.
         If the length is shorter than this, then the optimization should stop.
         :param max_error: The maximum error allowed for a valid track.
+        :param translation_step_length: Scale factor for the translations when updating p.
+        :param rotation_step_length: Scale factor for the rotation when updating p.
+        :param annealing_time_constant: Annealing step vector time constant.
+        :param visualize: Whether to show target, the image and the error image.
         :return: Return 0 when track is successful, 1 any point of the tracking patch is outside the image,
         2 if a invertible hessian is encountered and 3 if the final error is larger than max_error.
         """
         img_height, img_width = img.shape
 
+        if annealing_time_constant <= 0:
+            annealing_time_constant = 1
+
         # Initialization of parameters
+        p = np.array([self.pos_x, self.pos_y, self.theta])
         delta_p = np.zeros(3)
+        step_vector = np.array([translation_step_length, translation_step_length, rotation_step_length])
+        converged = False
 
         for iteration in range(max_iterations):
             # Out of bounds check
-            if is_out_of_bounds(img_height, img_width, self.pos_x, self.pos_y, self.patchSize):
+            if is_out_of_bounds(img_height, img_width, p[0], p[1], self.patchSize):
                 return 1
 
             # Warp image patch: I(W(x;p))
-            img_patch_warped = get_warped_patch(img, self.patchSize, self.pos_x, self.pos_y, self.theta)
+            img_patch_warped = get_warped_patch(img, self.patchSize, p[0], p[1], p[2])
 
             # Compute error: T(x) - I(W(x;p))
             img_patch_error = (self.trackingPatch - img_patch_warped)[:,:,np.newaxis]
 
             # Compute image gradient: nablaI(W(x;p))
-            img_patch_grad_warped = get_warped_patch(img_grad, self.patchSize, self.pos_x, self.pos_y, self.theta)[:,:,np.newaxis,:]
+            img_patch_grad_warped = get_warped_patch(img_grad, self.patchSize, p[0], p[1], p[2])[:,:,np.newaxis,:]
             
             # Evaluate Jacobian at (x,p)
-            jacobians = get_euclidean_jacobians(self.theta, self.patchSize, self.patchHalfSizeFloored)
+            jacobians = get_euclidean_jacobians(p[2], self.patchSize, self.patchHalfSizeFloored)
 
             # Compute the steepest descent
             steepest_descent = img_patch_grad_warped @ jacobians
@@ -152,23 +193,29 @@ class KLTTracker:
             delta_p = np.dot(np.linalg.inv(hessian), np.sum(descent_step, (0, 1, 3)))
 
             # Update p
-            self.translationX += translation_step_length*delta_p[0]
-            self.translationY += translation_step_length*delta_p[1]
-            self.theta += rotation_step_length*delta_p[2]
+            scale = 1 / (1 + (iteration / annealing_time_constant))
+            p += scale * step_vector * delta_p
 
             if visualize:
-                show_images([self.trackingPatch, img_patch_warped, img_patch_error], 
-                            ["Tracking patch", "Warped Patch", "Error patch"])
-                cv2.waitKey(50)
+                visualize_lucas_kanade(self.trackingPatch, img_patch_warped, img_patch_error)
 
             # Stopping criterion
             if np.sqrt(delta_p.dot(delta_p)) < min_delta_length:
+                converged = True
+                convergence_iteration = iteration + 1
                 break
         
-        print((img_patch_error**2).mean())
-
         if (img_patch_error**2).mean() > max_error:
             return 3
+
+        # Update translationX, translationY and theta
+        self.translationX = p[0] - self.initialPosition[0]
+        self.translationY = p[1] - self.initialPosition[1]
+        self.theta = p[2]
+
+        # Append number of iterations to convergence in log
+        if converged:
+            self.convergenceHistory.append(convergence_iteration)
 
         # Add new point to positionHistory to visualize tracking
         self.positionHistory.append((self.pos_x, self.pos_y, self.theta))
@@ -178,11 +225,12 @@ class KLTTracker:
 
 class PointTracker:
 
-    def __init__(self, max_points=40, tracking_patch_size=41):
+    def __init__(self, max_points=40, tracking_patch_size=15):
         self.maxPoints = max_points
         self.trackingPatchSize = tracking_patch_size
         self.currentTrackers = []
         self.nextTrackerId = 0
+        self.convergenceHistory = []
 
     def visualize(self, img: np.ndarray, draw_id=False):
         img_vis = cv2.cvtColor((img*255).astype(np.uint8), cv2.COLOR_GRAY2RGB)
@@ -245,7 +293,7 @@ class PointTracker:
             self.currentTrackers.append(KLTTracker(point, origin_image, self.trackingPatchSize, self.nextTrackerId))
             self.nextTrackerId += 1
 
-    def track_on_image(self, img: np.ndarray, max_iterations=25) -> None:
+    def track_on_image(self, img: np.ndarray, max_iterations=25, visualize=False) -> None:
 
         img_dx = cv2.Scharr(img, cv2.CV_64FC1, 1, 0)
         img_dy = cv2.Scharr(img, cv2.CV_64FC1, 0, 1)
@@ -254,7 +302,7 @@ class PointTracker:
         lost_track = []
         tracker_return_values = defaultdict(int)
         for klt in self.currentTrackers:
-            tracker_condition = klt.track_new_image(img, img_grad, max_iterations)
+            tracker_condition = klt.track_new_image(img, img_grad, max_iterations, visualize=visualize)
             tracker_return_values[tracker_condition] += 1
             if tracker_condition != 0:
                 lost_track.append(klt)
@@ -263,6 +311,7 @@ class PointTracker:
               f"singular_hessian: {tracker_return_values[2]}, large error: {tracker_return_values[3]}")
 
         for klt in lost_track:
+            self.convergenceHistory.extend(klt.convergenceHistory) # Add convergences steps to log
             self.currentTrackers.remove(klt)
 
     def get_position_with_id(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -275,3 +324,17 @@ class PointTracker:
             positions[:, i] = (klt.pos_x, klt.pos_y)
         
         return ids, positions
+
+    def write_convergence_log(self, data_set):
+        """
+        Writes the PointTracker's convergence log as a .csv file.
+        :param data_set: The name of the dataset.
+        """
+        file_name = data_set + '_log.csv'
+
+        with open(file_name, mode='w') as csv_file:
+            field_names = ['n_convergence_steps']
+            writer = csv.DictWriter(csv_file, fieldnames=field_names)
+            writer.writeheader()
+            for convergence_steps in self.convergenceHistory:
+                writer.writerow({'n_convergence_steps': convergence_steps})
