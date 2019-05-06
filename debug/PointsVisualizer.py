@@ -73,7 +73,13 @@ class PointVisualizer:
         if len(points) == 0:
             return
 
-        R = orientation.rotation_matrix
-        points = R @ points + position[:, np.newaxis]
+        transform = Transform3D()
+        transform.translate(*position)
+
+        qx, qy, qz, qw = orientation
+        q = QtGui.QQuaternion(qw, qx, qy, qz)
+
+        transform.rotate(q)
+        points = transform.map(points)
 
         self.points.setData(pos=points.T)
